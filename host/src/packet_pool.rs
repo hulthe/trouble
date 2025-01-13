@@ -6,7 +6,7 @@ use embassy_sync::blocking_mutex::Mutex;
 
 use crate::types::l2cap::{L2CAP_CID_ATT, L2CAP_CID_DYN_START};
 
-// Generic client ID used by ATT PDU
+/// Generic client ID used by ATT PDU
 pub(crate) const ATT_ID: AllocId = AllocId(0);
 
 #[derive(Clone, Copy, Debug)]

@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use rand::thread_rng;
 use tokio::select;
 use trouble_host::prelude::*;
 
@@ -59,7 +60,7 @@ async fn gatt_client_server() {
 
         let server = GattServer::<NoopRawMutex, 10>::new(stack, table);
         select! {
-            r = runner.run() => {
+            r = runner.run(thread_rng()) => {
                 r
             }
             r = server.run() => {
@@ -130,7 +131,7 @@ async fn gatt_client_server() {
             trouble_host::new(controller_central, &mut resources).build();
 
         select! {
-            r = runner.run() => {
+            r = runner.run(thread_rng()) => {
                 r
             }
             r = async {

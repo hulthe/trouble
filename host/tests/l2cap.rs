@@ -1,3 +1,4 @@
+use rand::thread_rng;
 use tokio::select;
 use tokio::time::Duration;
 use trouble_host::prelude::*;
@@ -31,7 +32,7 @@ async fn l2cap_connection_oriented_channels() {
             .build();
 
         select! {
-            r = runner.run() => {
+            r = runner.run(thread_rng()) => {
                 r
             }
             r = async {
@@ -92,7 +93,7 @@ async fn l2cap_connection_oriented_channels() {
             trouble_host::new(controller_central, &mut resources).build();
 
         select! {
-            r = runner.run() => {
+            r = runner.run(thread_rng()) => {
                 r
             }
             r = async {

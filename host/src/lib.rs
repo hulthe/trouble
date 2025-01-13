@@ -102,7 +102,7 @@ mod attribute_server;
 pub mod gatt;
 
 /// A BLE address.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Address {
     /// Address type.
@@ -113,9 +113,17 @@ pub struct Address {
 
 impl Address {
     /// Create a new random address.
-    pub fn random(val: [u8; 6]) -> Self {
+    pub const fn random(val: [u8; 6]) -> Self {
         Self {
             kind: AddrKind::RANDOM,
+            addr: BdAddr::new(val),
+        }
+    }
+
+    /// Create a new random address.
+    pub const fn public(val: [u8; 6]) -> Self {
+        Self {
+            kind: AddrKind::PUBLIC,
             addr: BdAddr::new(val),
         }
     }
@@ -198,6 +206,12 @@ impl From<FromHciBytesError> for Error {
 impl From<AttErrorCode> for Error {
     fn from(error: AttErrorCode) -> Self {
         Self::Att(error)
+    }
+}
+
+impl From<SecurityManagerError> for Error {
+    fn from(error: SecurityManagerError) -> Self {
+        Error::Security(error)
     }
 }
 

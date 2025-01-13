@@ -8,7 +8,8 @@ use embassy_sync::channel::Channel;
 use embassy_sync::waitqueue::WakerRegistration;
 
 use crate::connection::{Connection, ConnectionEvent};
-use crate::{config, Error};
+use crate::security_manager::SecurityManager;
+use crate::{config, Address, Error};
 
 struct State<'d> {
     connections: &'d mut [ConnectionStorage],
@@ -91,7 +92,7 @@ impl<'d> ConnectionManager<'d> {
     pub(crate) fn peer_address(&self, index: u8) -> BdAddr {
         self.with_mut(|state| {
             let state = &mut state.connections[index as usize];
-            state.peer_addr.unwrap()
+            state.peer_addr.unwrap().addr
         })
     }
 
@@ -219,8 +220,10 @@ impl<'d> ConnectionManager<'d> {
                 storage.link_credits = default_credits;
                 storage.att_mtu = default_att_mtu;
                 storage.handle.replace(handle);
-                storage.peer_addr_kind.replace(peer_addr_kind);
-                storage.peer_addr.replace(peer_addr);
+                storage.peer_addr.replace(Address {
+                    kind: peer_addr_kind,
+                    addr: peer_addr,
+                });
                 storage.role.replace(role);
                 match role {
                     LeConnRole::Central => {
@@ -260,8 +263,9 @@ impl<'d> ConnectionManager<'d> {
                 let r = storage.role.unwrap();
                 if r == role {
                     if !peers.is_empty() {
-                        for peer in peers.iter() {
-                            if storage.peer_addr_kind.unwrap() == peer.0 && &storage.peer_addr.unwrap() == peer.1 {
+                        for &(kind, &addr) in peers {
+                            let peer = Address { kind, addr };
+                            if storage.peer_addr == Some(peer) {
                                 storage.state = ConnectionState::Connected;
                                 trace!(
                                     "[link][poll_accept] connection handle {:?} in role {:?} accepted",
@@ -442,12 +446,13 @@ pub struct ConnectionStorage {
     pub state: ConnectionState,
     pub handle: Option<ConnHandle>,
     pub role: Option<LeConnRole>,
-    pub peer_addr_kind: Option<AddrKind>,
-    pub peer_addr: Option<BdAddr>,
+    //pub peer_addr_kind: Option<AddrKind>,
+    pub peer_addr: Option<Address>,
     pub att_mtu: u16,
     pub link_credits: usize,
     pub link_credit_waker: WakerRegistration,
     pub refcount: u8,
+    pub security_manager: SecurityManager,
     #[cfg(feature = "connection-metrics")]
     pub metrics: Metrics,
 }
@@ -506,7 +511,6 @@ impl ConnectionStorage {
         state: ConnectionState::Disconnected,
         handle: None,
         role: None,
-        peer_addr_kind: None,
         peer_addr: None,
         att_mtu: 23,
         link_credits: 0,
@@ -514,6 +518,7 @@ impl ConnectionStorage {
         refcount: 0,
         #[cfg(feature = "connection-metrics")]
         metrics: Metrics::new(),
+        security_manager: SecurityManager::new(),
     };
 }
 

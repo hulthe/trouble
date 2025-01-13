@@ -31,6 +31,7 @@ log = { version = "0.4.16", optional = true }
 defmt = { version = "0.3", optional = true }
 num_enum = { version = "0.7.3", default-features = false }
 thiserror = { version = "2.0.0", default-features = false }
+duplicate = { version = "2.0.0", default-features = false }
 
 [dev-dependencies]
 tokio = { version = "1", default-features = false, features = [

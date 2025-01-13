@@ -31,6 +31,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::once_lock::OnceLock;
 use embassy_sync::waitqueue::WakerRegistration;
 use futures::pin_mut;
+use rand_core::CryptoRngCore;
 
 use crate::channel_manager::{ChannelManager, ChannelStorage, PacketChannel};
 use crate::command::CommandState;
@@ -43,6 +44,7 @@ use crate::pdu::Pdu;
 use crate::scan::ScanReport;
 use crate::types::l2cap::{
     L2capHeader, L2capSignal, L2capSignalHeader, L2CAP_CID_ATT, L2CAP_CID_DYN_START, L2CAP_CID_LE_U_SIGNAL,
+    L2CAP_CID_SM,
 };
 use crate::{att, config, Address, BleHostError, Error, Stack};
 
@@ -53,11 +55,11 @@ use crate::{att, config, Address, BleHostError, Error, Stack};
 ///
 /// The host performs connection management, l2cap channel management, and
 /// multiplexes events and data across connections and l2cap channels.
-pub(crate) struct BleHost<'d, T> {
+pub(crate) struct BleHost<'d, C> {
     initialized: OnceLock<InitialState>,
     metrics: RefCell<HostMetrics>,
     pub(crate) address: Option<Address>,
-    pub(crate) controller: T,
+    pub(crate) controller: C,
     pub(crate) connections: ConnectionManager<'d>,
     pub(crate) reassembly: PacketReassembly<'d>,
     pub(crate) channels: ChannelManager<'d, { config::L2CAP_RX_QUEUE_SIZE }>,
@@ -298,7 +300,7 @@ where
         true
     }
 
-    fn handle_acl(&self, acl: AclPacket<'_>) -> Result<(), Error> {
+    fn handle_acl<R: CryptoRngCore>(&self, rng: &mut R, acl: AclPacket<'_>) -> Result<(), Error> {
         self.connections.received(acl.handle())?;
         let (header, mut packet) = match acl.boundary_flag() {
             AclPacketBoundary::FirstFlushable => {
@@ -306,7 +308,7 @@ where
 
                 // Ignore channels we don't support
                 if header.channel < L2CAP_CID_DYN_START
-                    && !(&[L2CAP_CID_LE_U_SIGNAL, L2CAP_CID_ATT].contains(&header.channel))
+                    && ![L2CAP_CID_LE_U_SIGNAL, L2CAP_CID_ATT, L2CAP_CID_SM].contains(&header.channel)
                 {
                     warn!("[host] unsupported l2cap channel id {}", header.channel);
                     return Err(Error::NotSupported);
@@ -402,6 +404,25 @@ where
             }
             L2CAP_CID_LE_U_SIGNAL => {
                 panic!("le signalling channel was fragmented, impossible!");
+            }
+            L2CAP_CID_SM => {
+                let handle = acl.handle();
+                let Some(local_address) = self.address else {
+                    warn!("No local address set. Unable to handle pairing request.");
+                    return Err(Error::NotSupported);
+                };
+
+                self.connections.with_connected_handle(handle, |connection| {
+                    let Some(peer_addr) = connection.peer_addr else {
+                        warn!("No peer address set. Unable to handle pairing request.");
+                        return Err(Error::Disconnected);
+                    };
+
+                    connection
+                        .security_manager
+                        .with_context(self, rng, local_address, peer_addr, handle)
+                        .handle(acl.data())
+                })?;
             }
             other if other >= L2CAP_CID_DYN_START => match self.channels.dispatch(header, packet) {
                 Ok(_) => {}
@@ -501,7 +522,8 @@ impl<'d, C: Controller> Runner<'d, C> {
     }
 
     /// Run the host.
-    pub async fn run(&mut self) -> Result<(), BleHostError<C::Error>>
+    // TODO: i'm cheating by taking the rng as an argument here.
+    pub async fn run<R: CryptoRngCore>(&mut self, rng: R) -> Result<(), BleHostError<C::Error>>
     where
         C: ControllerCmdSync<Disconnect>
             + ControllerCmdSync<SetEventMask>
@@ -518,11 +540,15 @@ impl<'d, C: Controller> Runner<'d, C> {
             + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>
             + ControllerCmdSync<LeReadBufferSize>,
     {
-        self.run_with_handler(|_| {}).await
+        self.run_with_handler(rng, |_| {}).await
     }
 
     /// Run the host with a vendor event handler for custom events.
-    pub async fn run_with_handler<F: Fn(&Vendor)>(&mut self, vendor_handler: F) -> Result<(), BleHostError<C::Error>>
+    pub async fn run_with_handler<F: Fn(&Vendor), R: CryptoRngCore>(
+        &mut self,
+        rng: R,
+        vendor_handler: F,
+    ) -> Result<(), BleHostError<C::Error>>
     where
         C: ControllerCmdSync<Disconnect>
             + ControllerCmdSync<SetEventMask>
@@ -540,7 +566,7 @@ impl<'d, C: Controller> Runner<'d, C> {
             + ControllerCmdSync<LeReadBufferSize>,
     {
         let control_fut = self.control.run();
-        let rx_fut = self.rx.run_with_handler(vendor_handler);
+        let rx_fut = self.rx.run_with_handler(rng, vendor_handler);
         let tx_fut = self.tx.run();
         pin_mut!(control_fut, rx_fut, tx_fut);
         match select3(&mut tx_fut, &mut rx_fut, &mut control_fut).await {
@@ -562,16 +588,20 @@ impl<'d, C: Controller> Runner<'d, C> {
 
 impl<'d, C: Controller> RxRunner<'d, C> {
     /// Run the receive loop that polls the controller for events.
-    pub async fn run(&mut self) -> Result<(), BleHostError<C::Error>>
+    pub async fn run<R: CryptoRngCore>(&mut self, rng: R) -> Result<(), BleHostError<C::Error>>
     where
         C: ControllerCmdSync<Disconnect> + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>,
     {
-        self.run_with_handler(|_| {}).await
+        self.run_with_handler(rng, |_| {}).await
     }
 
     /// Runs the receive loop that pools the controller for events, dispatching
     /// vendor events to the provided closure.
-    pub async fn run_with_handler<F: Fn(&Vendor)>(&mut self, vendor_handler: F) -> Result<(), BleHostError<C::Error>>
+    pub async fn run_with_handler<F: Fn(&Vendor), R: CryptoRngCore>(
+        &mut self,
+        mut rng: R,
+        vendor_handler: F,
+    ) -> Result<(), BleHostError<C::Error>>
     where
         C: ControllerCmdSync<Disconnect> + for<'t> ControllerCmdSync<HostNumberOfCompletedPackets<'t>>,
     {
@@ -591,7 +621,7 @@ impl<'d, C: Controller> RxRunner<'d, C> {
             // last = Instant::now();
             //        trace!("[host] polling took {} ms", (polled - started).as_millis());
             match result {
-                Ok(ControllerToHostPacket::Acl(acl)) => match host.handle_acl(acl) {
+                Ok(ControllerToHostPacket::Acl(acl)) => match host.handle_acl(&mut rng, acl) {
                     Ok(_) => {
                         //let processed = Instant::now();
                         // trace!("[host] ACL process to {} ms", (processed - last).as_millis());
