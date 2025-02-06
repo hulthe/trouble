@@ -302,7 +302,7 @@ where
 
     fn handle_acl<R: CryptoRngCore>(&self, rng: &mut R, acl: AclPacket<'_>) -> Result<(), Error> {
         self.connections.received(acl.handle())?;
-        let (header, mut packet) = match acl.boundary_flag() {
+        let (header, packet) = match acl.boundary_flag() {
             AclPacketBoundary::FirstFlushable => {
                 let (header, data) = L2capHeader::from_hci_bytes(acl.data())?;
 
@@ -363,6 +363,7 @@ where
                         length: 3,
                     };
 
+                    let mut packet = packet;
                     let mut w = WriteCursor::new(packet.as_mut());
                     w.write_hci(&l2cap)?;
                     w.write(rsp)?;
@@ -406,7 +407,9 @@ where
                 panic!("le signalling channel was fragmented, impossible!");
             }
             L2CAP_CID_SM => {
+                let sm_packet = &packet.as_ref()[..header.length as usize];
                 let handle = acl.handle();
+
                 let Some(local_address) = self.address else {
                     warn!("No local address set. Unable to handle pairing request.");
                     return Err(Error::NotSupported);
@@ -421,7 +424,7 @@ where
                     connection
                         .security_manager
                         .with_context(self, rng, local_address, peer_addr, handle)
-                        .handle(acl.data())
+                        .handle(sm_packet)
                 })?;
             }
             other if other >= L2CAP_CID_DYN_START => match self.channels.dispatch(header, packet) {

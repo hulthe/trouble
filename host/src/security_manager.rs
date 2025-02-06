@@ -19,6 +19,7 @@ use crate::{
 
 mod types;
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum SecurityManagerError {
@@ -69,8 +70,13 @@ pub struct SecurityManagerHandle<'a, 'h, C, R> {
 
 // TODO: name?
 struct PeerKeyData {
+    /// Their public key.
     pka: PublicKey,
+
+    /// Our public key.
     pkb: PublicKey,
+
+    /// Our secret key.
     skb: SecretKey,
     confirm: Confirm,
     nb: Nonce,
@@ -119,7 +125,7 @@ impl PairingState {
 impl SecurityManager {
     pub const fn new() -> Self {
         Self {
-            io_capability: IoCapability::DISPLAY_ONLY,
+            io_capability: IoCapability::DISPLAY_YES_NO,
             pairing: PairingState::None,
         }
     }
@@ -146,6 +152,7 @@ impl SecurityManager {
 impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
     /// Handle packet
     pub(crate) fn handle(&mut self, payload: &[u8]) -> Result<(), Error> {
+        debug!("[SecurityManager] handle({:x})", payload);
         let Some((&command, data)) = payload.split_first() else {
             warn!("[SecurityManager] received empty message");
             return Err(Error::InvalidValue);
@@ -240,7 +247,7 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
     }
 
     fn handle_pairing_request(&mut self, data: &[u8]) -> Result<(), Error> {
-        let Some(data) = PairingRequest::try_from_slice(data) else {
+        let Some(pairing_request) = PairingRequest::try_from_slice(data) else {
             warn!("[SecurityManager] Failed to decode PairingRequest message");
             return Err(Error::InvalidValue);
         };
@@ -255,8 +262,6 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
                 .write_error(SecurityManagerError::UnspecifiedReason);
         };
 
-        self.sm.pairing = PairingState::ReceivedPairingRequest { pairing_request: data };
-
         let response = SmCommand::new(PairingResponse {
             io_capability: self.sm.io_capability,
             oob_data_flag: OobDataFlag::AUTH_DATA_NOT_PRESENT,
@@ -265,13 +270,22 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
             initiator_key_distribution: 0,     // TODO
             responder_key_distribution: 0,     // TODO
         });
-        self.write_command(&response)
+        self.write_command(&response)?;
+
+        self.sm.pairing = PairingState::ReceivedPairingRequest { pairing_request };
+
+        Ok(())
     }
 
     fn handle_pairing_public_key(&mut self, pka: &[u8]) -> Result<(), Error> {
         debug!("[SecurityManager] Handle pairing public key");
-        debug!("[SecurityManager] key len = {} {:02x?}", pka.len(), pka);
-        let pka = PublicKey::from_bytes(pka);
+        debug!("[SecurityManager] key len = {} {:x}", pka.len(), pka);
+        //let Some(pka) = PairingPublicKey::try_from_slice(pka) else {
+        //    return self
+        //        // TODO: error kind
+        //        .write_error(SecurityManagerError::UnspecifiedReason);
+        //};
+        let pka = PublicKey::from_bytes(pka); // TODO: make this less panicky
 
         let PairingState::ReceivedPairingRequest { pairing_request } = self.sm.pairing.take() else {
             // TODO: Print PairingState kind (but not the data)
@@ -293,10 +307,8 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
         }))?;
 
         let Some(dh_key) = skb.dh_key(pka) else {
-            // TODO: is this ok?
-            self.write_command(&SmCommand::new(PairingFailed::DHKEY_CHECK_FAILED))?;
-
-            return Err(SecurityManagerError::DHKeyCheckFailed.into());
+            // TODO: is this the correct error?
+            return self.write_error(SecurityManagerError::KeyRejected);
         };
 
         // SUBTLE: The order of these send/recv ops is important. See last
@@ -322,13 +334,13 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
     }
 
     fn handle_pairing_random(&mut self, data: &[u8]) -> Result<(), Error> {
-        let Some(data) = PairingRandom::try_from_slice(data) else {
+        let Some(PairingRandom(random)) = PairingRandom::try_from_slice(data) else {
             warn!("[SecurityManager] Failed to decode PairingRandom message");
             return Err(Error::InvalidValue);
         };
 
         debug!("[SecurityManager] Handle pairing random");
-        debug!("[SecurityManager] Got pairing random: {:02x?}", data);
+        debug!("[SecurityManager] Got pairing random: {:x}", data);
 
         let PairingState::ReceivedPublicKey { pairing_request, keys } = self.sm.pairing.take() else {
             // TODO: Print PairingState kind (but not the data)
@@ -349,11 +361,10 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
 
         // TODO: Do checking
 
-        let random = nb.0.to_le_bytes();
-        self.write_command(&SmCommand::new(PairingRandom(random)))?;
+        self.write_command(&SmCommand::new(PairingRandom(nb.0.to_le_bytes())))?;
 
-        // TODO: this can't be right? why copy nb to na and then add nb again?
         let na = Nonce(u128::from_le_bytes(random));
+
         let vb = na.g2(pka.x(), pkb.x(), &nb);
 
         // TODO: if IoCapability includes input, we should wait for confirmation from user
@@ -367,15 +378,17 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
         // Authentication stage 2 and long term key calculation
         // ([Vol 3] Part H, Section 2.3.5.6.5 and C.2.2.4).
 
-        let ra = 0;
-        trace!("peer_address = {:02x?}", self.peer_address);
-        trace!("local_address = {:02x?}", self.local_address);
+        let ra = 0; // TODO
+        debug!("peer_address = {:x}", self.peer_address);
+        debug!("local_address = {:x}", self.local_address);
 
         let auth_req = make_auth_req();
         let oob_data = false;
         let io_cap = self.sm.io_capability.as_u8();
         let iob = IoCap::new(auth_req.into(), false, io_cap);
 
+        debug!("peer_address = {:x}", self.peer_address);
+        debug!("local_address = {:x}", self.local_address);
         let (mac_key, ltk) = dh_key.f5(na, *nb, self.peer_address, self.local_address);
         let eb = mac_key.f6(*nb, na, ra, iob, self.local_address, self.peer_address);
 
@@ -393,7 +406,7 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
 
     fn handle_pairing_dhkey_check(&mut self, ea: &[u8]) -> Result<(), Error> {
         debug!("[SecurityManager] Handle pairing dhkey check");
-        debug!("[SecurityManager] Got ea: {:02x?}", ea);
+        debug!("[SecurityManager] Got ea: {:x}", ea);
 
         let PairingState::ReceivedRandomData {
             pairing_request,
@@ -425,13 +438,29 @@ impl<C: Controller, R: CryptoRngCore> SecurityManagerHandle<'_, '_, C, R> {
             pairing_request.oob_data_flag.as_u8() != 0,
             pairing_request.io_capability.as_u8(),
         );
-        let computed_ea = mac_key
+        debug!("[SecurityManager] pairing_request: {:x}", pairing_request);
+        debug!("[SecurityManager] ioa: {:x}", ioa);
+        let expected_ea = mac_key
             .f6(na, *nb, 0, ioa, self.peer_address, self.local_address)
             .0
             .to_le_bytes();
 
-        if ea != computed_ea {
+        if ea != expected_ea {
             warn!("[SecurityManager] DH check failed");
+            debug!("[SecurityManager] received: {:x}", ea);
+            debug!("[SecurityManager] expected: {:x}", expected_ea);
+            debug!("[SecurityManager] mac_key: {:x}", mac_key.0 .0.as_slice());
+            debug!("[SecurityManager] keys.pka: {:x}", pka);
+            debug!("[SecurityManager] keys.pkb: {:x}", pkb);
+            debug!("[SecurityManager] keys.skb: {:x}", skb.0.to_bytes().as_slice());
+            debug!("[SecurityManager] keys.confirm: {:x}", confirm.0);
+            debug!("[SecurityManager]      na: {:x}", na);
+            debug!("[SecurityManager] keys.nb: {:x}", nb);
+            debug!(
+                "[SecurityManager] keys.dh_key: {:x}",
+                dh_key.0.raw_secret_bytes().as_slice()
+            );
+            self.write_command(&SmCommand::new(PairingFailed::DHKEY_CHECK_FAILED))?;
             return Err(SecurityManagerError::DHKeyCheckFailed.into());
         }
 
@@ -461,6 +490,129 @@ impl Debug for PairingState {
             Self::ReceivedPublicKey { .. } => f.debug_tuple("ReceivedPublicKey").field(&..).finish(),
             Self::ReceivedRandomData { .. } => f.debug_tuple("ReceivedRandomData").field(&..).finish(),
             Self::Paired {} => f.debug_tuple("Paired").field(&..).finish(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    extern crate std;
+    use core::{convert::Infallible, future::pending};
+    use std::println;
+    use std::vec::Vec;
+
+    use bt_hci::{controller::ExternalController, transport::SerialTransport};
+    use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+    use embedded_io::ErrorType;
+    use futures::{executor::block_on, select, FutureExt};
+    use rand_chacha::{rand_core::SeedableRng, ChaCha8Core, ChaCha8Rng};
+    use tokio::task::yield_now;
+
+    use crate::{packet_pool::Qos, HostResources};
+
+    use super::*;
+
+    const L2CAP_MTU: usize = 1017;
+    const CONNECTIONS_MAX: usize = 1;
+    const L2CAP_CHANNELS_MAX: usize = 2; // Signal + att
+
+    type Resources<C> = HostResources<C, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX, L2CAP_MTU>;
+
+    #[test]
+    fn pairing() {
+        let mut input = Vec::<&[u8]>::new();
+
+        //DEBUG - decoding SM packet [01, 01, 00, 2d, 10, 0d, 0f]
+        input.push(&[0x01, 0x01, 0x00, 0x2d, 0x10, 0x0d, 0x0f]);
+
+        //DEBUG - writing sm command [2, 1, 0, 2d, 10, 0, 0]
+        //DEBUG - decoding SM packet [0c, 45, 97, f4, 9f, cd, 51, fd, d5, a1, 29, 63, e5, 19, 36, 34, 03, da, 8f, 78, 1c, 7a, 0b, cb, f9, 0f, 75, a9, bf, d7, 1a, eb, 52, 6b, f1, 0c, 23, 17, da, 73, 8e, 36, 2a, 3c, 90, 87, f7, cd, 62, a3, c3, c9, 79, eb, 6f, 9e, ef, d6, da, a2, e7, 21, 22, 1d, 7d]
+        input.push(&[
+            0x0c, 0x45, 0x97, 0xf4, 0x9f, 0xcd, 0x51, 0xfd, 0xd5, 0xa1, 0x29, 0x63, 0xe5, 0x19, 0x36, 0x34, 0x03, 0xda,
+            0x8f, 0x78, 0x1c, 0x7a, 0x0b, 0xcb, 0xf9, 0x0f, 0x75, 0xa9, 0xbf, 0xd7, 0x1a, 0xeb, 0x52, 0x6b, 0xf1, 0x0c,
+            0x23, 0x17, 0xda, 0x73, 0x8e, 0x36, 0x2a, 0x3c, 0x90, 0x87, 0xf7, 0xcd, 0x62, 0xa3, 0xc3, 0xc9, 0x79, 0xeb,
+            0x6f, 0x9e, 0xef, 0xd6, 0xda, 0xa2, 0xe7, 0x21, 0x22, 0x1d, 0x7d,
+        ]);
+        //DEBUG - writing sm command [c, 81, b3, 32, ed, e0, e5, ae, ca, 41, a4, 44, 3c, 7d, 78, 6b, a9, f8, ae, e2, 62, a5, ec, c4, 6d, f2, 31, 3f, cc, d, 6e, 38, 6e, de, e, 66, c9, 63, db, ed, 9b, 9d, 4f, 6e, c, 52, f4, 1e, 4f, 25, 9d, bc, 1e, 1e, dc, f3, 1e, 53, 72, 20, ca, 1a, f4, 42, 89]
+        //DEBUG - writing sm command [3, d1, 83, 7, ec, 80, 1d, be, 18, 61, b1, f5, e8, 58, 52, be, 96]
+        //DEBUG - decoding SM packet [04, cb, 26, 87, 27, d1, 95, 3d, d3, 67, 32, c3, 21, 9c, 8d, 05, 33]
+        input.push(&[
+            0x04, 0xcb, 0x26, 0x87, 0x27, 0xd1, 0x95, 0x3d, 0xd3, 0x67, 0x32, 0xc3, 0x21, 0x9c, 0x8d, 0x05, 0x33,
+        ]);
+        //DEBUG - writing sm command [4, 8d, 1a, a7, c2, 4a, db, e0, 52, b4, 9f, ca, 57, 81, 26, 3e, f1]
+        //DEBUG - decoding SM packet [0d, 0d, bf, de, 9e, 32, cb, 07, ae, f9, 33, 18, f4, 85, dd, ec, 56]
+        input.push(&[
+            0x0d, 0x0d, 0xbf, 0xde, 0x9e, 0x32, 0xcb, 0x07, 0xae, 0xf9, 0x33, 0x18, 0xf4, 0x85, 0xdd, 0xec, 0x56,
+        ]);
+        //DEBUG - writing sm command [d, d6, 4e, c9, 73, 28, 61, 67, b6, 6d, 23, c1, b3, f7, bf, 92, fd]
+
+        let mut writer = Vec::<u8>::new();
+        let controller =
+            ExternalController::<_, 10>::new(SerialTransport::<NoopRawMutex, _, _>::new(PendingReader, &mut writer));
+        let mut resources = Resources::new(Qos::None);
+        let local_address = Address::random([0x41, 0x5A, 0xE3, 0x1E, 0x83, 0xE7]);
+        let peer_address = Address::random([0x41, 0xaa, 0xaa, 0xaa, 0xaa, 0xe7]);
+        let (stack, _bt_peripheral, _central, mut runner) = crate::new(controller, &mut resources)
+            .set_random_address(local_address)
+            .build();
+
+        // TODO: set up a connection _stack.host.connections;
+
+        let rng = ChaCha8Core::seed_from_u64(0x1234567891011);
+        let rng = ChaCha8Rng::from(rng);
+
+        let mut rng2 = rng.clone();
+        let run_test = async {
+            for sm_command in input {
+                //let handle = stack.host.connections.handle(0);
+                let handle = ConnHandle::new(0);
+                let connections = &stack.host.connections;
+                connections
+                    .connect(
+                        handle,
+                        peer_address.kind,
+                        peer_address.addr,
+                        bt_hci::param::LeConnRole::Central,
+                    )
+                    .expect("HUHHUH??");
+                let conn = connections.accept(bt_hci::param::LeConnRole::Central, &[]).await;
+                println!("wat wat wat wat wat wat wat wat wat {:?}", conn.handle());
+                stack
+                    .host
+                    .connections
+                    .with_connected_handle(handle, |conn| {
+                        conn.security_manager
+                            .with_context(stack.host, &mut rng2, local_address, peer_address, handle)
+                            .handle(sm_command)
+                    })
+                    .expect("unga bunga");
+
+                yield_now().await;
+            }
+        };
+
+        block_on(async {
+            select! {
+                r = runner.run(rng).fuse() => {
+                    panic!("runner exited: {r:?}");
+                }
+
+                _ = run_test.fuse() => {
+                    panic!("done?");
+                }
+            }
+        });
+    }
+
+    struct PendingReader;
+
+    impl ErrorType for PendingReader {
+        type Error = Infallible;
+    }
+
+    impl embedded_io_async::Read for PendingReader {
+        async fn read(&mut self, buf: &mut [u8]) -> Result<usize, Self::Error> {
+            pending().await
         }
     }
 }

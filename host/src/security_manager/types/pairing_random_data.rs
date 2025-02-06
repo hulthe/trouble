@@ -1,3 +1,5 @@
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone)]
 #[repr(transparent)]
 pub struct PairingRandom(pub [u8; 16]);
 

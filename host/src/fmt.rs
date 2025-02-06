@@ -100,10 +100,10 @@ macro_rules! unreachable {
 macro_rules! panic {
     ($($x:tt)*) => {
         {
-            #[cfg(not(feature = "defmt"))]
+            //#[cfg(not(feature = "defmt"))]
             ::core::panic!($($x)*);
-            #[cfg(feature = "defmt")]
-            ::defmt::panic!($($x)*);
+            //#[cfg(feature = "defmt")]
+            //::defmt::panic!($($x)*);
         }
     };
 }

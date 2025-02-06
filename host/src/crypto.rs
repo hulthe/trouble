@@ -81,7 +81,7 @@ impl AesCmac {
 pub struct Check(pub u128);
 
 #[repr(transparent)]
-pub(super) struct Key(aes::cipher::Key<aes::Aes128>);
+pub(super) struct Key(pub aes::cipher::Key<aes::Aes128>);
 
 impl Key {
     /// Creates a key from a `u128` value.
@@ -102,6 +102,7 @@ impl From<&Key> for u128 {
 /// [`MacKey::f6`] function ([Vol 3] Part H, Section 2.2.8).
 #[repr(transparent)]
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct IoCap([u8; 3]);
 
 impl IoCap {
@@ -116,7 +117,7 @@ impl IoCap {
 /// ([Vol 3] Part H, Section 2.2.8).
 #[must_use]
 #[repr(transparent)]
-pub struct MacKey(Key);
+pub struct MacKey(pub Key);
 
 impl MacKey {
     /// Generates LE Secure Connections check value
@@ -136,6 +137,7 @@ impl MacKey {
 
 /// 128-bit random nonce value ([Vol 3] Part H, Section 2.3.5.6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(transparent)]
 pub struct Nonce(pub u128);
 
@@ -193,7 +195,7 @@ pub struct NumCompare(pub u32);
 /// P-256 elliptic curve secret key.
 #[must_use]
 #[repr(transparent)]
-pub struct SecretKey(p256::NonZeroScalar);
+pub struct SecretKey(pub p256::NonZeroScalar);
 
 impl SecretKey {
     /// Generates a new random secret key.
@@ -238,6 +240,7 @@ impl SecretKey {
 
 /// P-256 elliptic curve public key ([Vol 3] Part H, Section 3.5.6).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[must_use]
 pub struct PublicKey {
     pub x: PublicKeyX,
@@ -300,6 +303,7 @@ impl PublicKey {
 
 /// 256-bit elliptic curve coordinate in big-endian byte order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[repr(transparent)]
 pub struct Coord([u8; 256 / u8::BITS as usize]);
 
@@ -313,14 +317,15 @@ impl Coord {
     /// Returns the coordinate in little-endian byte order.
     #[inline(always)]
     pub(super) fn as_le_bytes(&self) -> [u8; core::mem::size_of::<Self>()] {
-        let mut be_bytes = *self.as_be_bytes();
-        be_bytes.reverse();
-        be_bytes
+        let mut bytes = *self.as_be_bytes();
+        bytes.reverse();
+        bytes
     }
 }
 
 /// P-256 elliptic curve public key affine X coordinate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[must_use]
 #[repr(transparent)]
 pub struct PublicKeyX(Coord);
@@ -342,16 +347,14 @@ impl PublicKeyX {
     /// Returns the coordinate in little-endian byte order.
     #[inline(always)]
     pub(super) fn as_le_bytes(&self) -> [u8; core::mem::size_of::<Self>()] {
-        let mut be_bytes = *self.as_be_bytes();
-        be_bytes.reverse();
-        be_bytes
+        self.0.as_le_bytes()
     }
 }
 
 /// P-256 elliptic curve shared secret ([Vol 3] Part H, Section 2.3.5.6.1).
 #[must_use]
 #[repr(transparent)]
-pub struct DHKey(ecdh::SharedSecret);
+pub struct DHKey(pub ecdh::SharedSecret);
 
 impl DHKey {
     /// Generates LE Secure Connections `MacKey` and `LTK`

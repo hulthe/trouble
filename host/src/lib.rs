@@ -115,6 +115,7 @@ impl Address {
     /// Create a new random address.
     pub const fn random(val: [u8; 6]) -> Self {
         Self {
+            // TODO: this might be incorrect
             kind: AddrKind::RANDOM,
             addr: BdAddr::new(val),
         }

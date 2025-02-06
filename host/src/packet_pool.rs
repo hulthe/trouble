@@ -4,10 +4,12 @@ use core::cell::RefCell;
 use embassy_sync::blocking_mutex::raw::RawMutex;
 use embassy_sync::blocking_mutex::Mutex;
 
-use crate::types::l2cap::{L2CAP_CID_ATT, L2CAP_CID_DYN_START};
+use crate::types::l2cap::{L2CAP_CID_ATT, L2CAP_CID_DYN_START, L2CAP_CID_SM};
 
 /// Generic client ID used by ATT PDU
 pub(crate) const ATT_ID: AllocId = AllocId(0);
+/// Generic client ID used by the Security Manager
+pub(crate) const SM_ID: AllocId = AllocId(1);
 
 #[derive(Clone, Copy, Debug)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -22,6 +24,7 @@ impl AllocId {
     pub(crate) fn from_channel(cid: u16) -> AllocId {
         match cid {
             L2CAP_CID_ATT => ATT_ID,
+            L2CAP_CID_SM => SM_ID,
             cid if cid >= L2CAP_CID_DYN_START => Self::dynamic((cid - L2CAP_CID_DYN_START) as usize),
             cid => {
                 panic!("unexpected channel id {}", cid);
